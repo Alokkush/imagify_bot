@@ -19,6 +19,10 @@ STABILITY_API_KEY = os.getenv("STABILITY_API_KEY")
 # Create Flask app (this is what Gunicorn needs)
 app = Flask(__name__)
 
+# Ensure BOT_TOKEN is set
+if not BOT_TOKEN:
+    raise ValueError("❌ ERROR: Please set your BOT_TOKEN environment variable.")
+
 # Create Telegram application
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
