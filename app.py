@@ -5,6 +5,7 @@ import base64
 import io
 import json
 from flask import Flask, request, jsonify
+from urllib.parse import quote
 
 # Enable logging
 logging.basicConfig(
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 STABILITY_API_KEY = os.getenv("STABILITY_API_KEY")
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")  # Optional
 
 # Create Flask app (this is what Gunicorn needs)
 app = Flask(__name__)
@@ -69,10 +71,33 @@ def send_telegram_photo_url(chat_id, photo_url, caption):
         logger.error(f"Error sending photo URL: {e}")
         return False
 
-def generate_image(prompt):
+def generate_image_huggingface(prompt):
+    """Generate image using Hugging Face API (Free tier available)"""
+    try:
+        # Using Stable Diffusion model on Hugging Face
+        api_url = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5"
+        
+        headers = {}
+        if HUGGINGFACE_API_KEY:
+            headers["Authorization"] = f"Bearer {HUGGINGFACE_API_KEY}"
+        
+        payload = {"inputs": prompt}
+        
+        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        
+        if response.status_code == 200:
+            return response.content  # Returns image bytes directly
+        else:
+            logger.error(f"Hugging Face API error: {response.status_code} - {response.text}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error generating image with Hugging Face: {e}")
+        return None
+
+def generate_image_stability(prompt):
     """Generate image using Stability AI API"""
     if not STABILITY_API_KEY:
-        logger.warning("No Stability API key configured")
         return None
         
     try:
@@ -97,13 +122,59 @@ def generate_image(prompt):
         if response.status_code == 200:
             result = response.json()
             if "artifacts" in result and len(result["artifacts"]) > 0:
-                return result["artifacts"][0]["base64"]
+                return base64.b64decode(result["artifacts"][0]["base64"])
         else:
             logger.error(f"Stability AI API error: {response.status_code} - {response.text}")
             
     except Exception as e:
-        logger.error(f"Error generating image: {e}")
+        logger.error(f"Error generating image with Stability: {e}")
     
+    return None
+
+def generate_image_pollinations(prompt):
+    """Generate image using Pollinations AI (Free service)"""
+    try:
+        # Pollinations.ai free API
+        url = f"https://image.pollinations.ai/prompt/{quote(prompt)}"
+        response = requests.get(url, timeout=60)
+        
+        if response.status_code == 200:
+            return response.content
+        else:
+            logger.error(f"Pollinations API error: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error generating image with Pollinations: {e}")
+        return None
+
+def generate_image(prompt):
+    """Try multiple AI services to generate an image"""
+    logger.info(f"Generating image for prompt: {prompt}")
+    
+    # Try Stability AI first (if API key available)
+    if STABILITY_API_KEY:
+        logger.info("Trying Stability AI...")
+        image_data = generate_image_stability(prompt)
+        if image_data:
+            logger.info("Stability AI succeeded")
+            return image_data
+    
+    # Try Pollinations AI (free)
+    logger.info("Trying Pollinations AI...")
+    image_data = generate_image_pollinations(prompt)
+    if image_data:
+        logger.info("Pollinations AI succeeded")
+        return image_data
+    
+    # Try Hugging Face (free tier)
+    logger.info("Trying Hugging Face...")
+    image_data = generate_image_huggingface(prompt)
+    if image_data:
+        logger.info("Hugging Face succeeded")
+        return image_data
+    
+    logger.warning("All AI services failed")
     return None
 
 def handle_start_command(chat_id):
@@ -111,7 +182,11 @@ def handle_start_command(chat_id):
     message = (
         "👋 <b>Welcome to Imagify Bot!</b>\n\n"
         "Send me any text prompt, and I'll generate an AI image for you 🎨✨\n\n"
-        "<i>Example:</i> 'A cat wearing a space suit on Mars'"
+        "<i>Examples:</i>\n"
+        "• 'A cat wearing a space suit on Mars'\n"
+        "• 'A fantasy castle in the clouds'\n"
+        "• 'A robot painting a sunset'\n\n"
+        "✨ <b>Powered by multiple AI services for best results!</b>"
     )
     send_telegram_message(chat_id, message)
 
@@ -120,38 +195,37 @@ def handle_text_message(chat_id, text):
     prompt = text.strip()
     
     # Send "generating" message
-    send_telegram_message(chat_id, "🎨 Generating image... please wait ⏳")
+    send_telegram_message(chat_id, "🎨 Generating your AI image... please wait ⏳")
     
     try:
-        # Try to generate image with Stability AI
-        image_base64 = generate_image(prompt)
+        # Try to generate image with multiple AI services
+        image_data = generate_image(prompt)
         
-        if image_base64:
-            # Convert base64 to bytes and send
-            image_data = base64.b64decode(image_base64)
+        if image_data:
+            # Send the generated image
             success = send_telegram_photo(
                 chat_id, 
                 io.BytesIO(image_data), 
-                f"✨ Prompt: {prompt}"
+                f"✨ <b>Generated:</b> {prompt}\n\n🤖 <i>Made with AI</i>"
             )
             
             if not success:
                 send_telegram_message(chat_id, "❌ Failed to send generated image. Please try again.")
         else:
-            # Fallback to placeholder image
-            placeholder_url = f"https://picsum.photos/512/512?random={abs(hash(prompt)) % 1000}"
-            success = send_telegram_photo_url(
-                chat_id,
-                placeholder_url,
-                f"✨ Placeholder image for: {prompt}\n(AI generation temporarily unavailable)"
+            # All AI services failed - send a nice fallback message
+            send_telegram_message(
+                chat_id, 
+                f"😔 Sorry, I couldn't generate an image for:\n<i>'{prompt}'</i>\n\n"
+                f"🔄 Please try:\n"
+                f"• A simpler prompt\n"
+                f"• Waiting a moment and trying again\n"
+                f"• Different wording\n\n"
+                f"💡 The AI services might be busy right now!"
             )
-            
-            if not success:
-                send_telegram_message(chat_id, "❌ Failed to generate image. Please try again later.")
                 
     except Exception as e:
         logger.error(f"Error in handle_text_message: {e}")
-        send_telegram_message(chat_id, "⚠️ Something went wrong while generating the image.")
+        send_telegram_message(chat_id, "⚠️ Something went wrong while generating the image. Please try again!")
 
 # Flask webhook endpoint
 @app.route("/webhook", methods=["POST"])
@@ -199,8 +273,17 @@ def health_check():
     if STABILITY_API_KEY:
         status += "✅ Stability API key configured<br>"
     else:
-        status += "⚠️ Stability API key missing (will use placeholder images)<br>"
+        status += "⚠️ Stability API key missing<br>"
+        
+    if HUGGINGFACE_API_KEY:
+        status += "✅ Hugging Face API key configured<br>"
+    else:
+        status += "ℹ️ Hugging Face API key missing (will use free tier)<br>"
     
+    status += "<br>🎨 <b>Available AI Services:</b><br>"
+    status += "• Stability AI (if key provided)<br>"
+    status += "• Pollinations.ai (free)<br>"
+    status += "• Hugging Face (free tier)<br>"
     status += "<br>Send a message to the bot to start generating images!"
     
     return status, 200
@@ -251,19 +334,28 @@ def webhook_info():
     except Exception as e:
         return f"❌ Error getting webhook info: {str(e)}", 500
 
-@app.route("/test_stability", methods=["GET"])
-def test_stability():
-    """Test Stability AI API"""
-    if not STABILITY_API_KEY:
-        return "❌ STABILITY_API_KEY not configured", 500
-    
+@app.route("/test_services", methods=["GET"])
+def test_services():
+    """Test all AI image generation services"""
+    results = {}
     test_prompt = "a simple red apple"
-    result = generate_image(test_prompt)
     
-    if result:
-        return "✅ Stability AI API is working", 200
+    # Test Stability AI
+    if STABILITY_API_KEY:
+        stability_result = generate_image_stability(test_prompt)
+        results["stability_ai"] = "✅ Working" if stability_result else "❌ Failed"
     else:
-        return "❌ Stability AI API test failed", 500
+        results["stability_ai"] = "⚠️ No API key"
+    
+    # Test Pollinations
+    pollinations_result = generate_image_pollinations(test_prompt)
+    results["pollinations"] = "✅ Working" if pollinations_result else "❌ Failed"
+    
+    # Test Hugging Face
+    hf_result = generate_image_huggingface(test_prompt)
+    results["hugging_face"] = "✅ Working" if hf_result else "❌ Failed"
+    
+    return jsonify(results)
 
 if __name__ == "__main__":
     if not BOT_TOKEN:
